@@ -7,10 +7,11 @@
 #
 
 library(dplyr)
+library(tidyr)
 library(tm)
 library(topicmodels)
 library(ggplot2)
-library(plotly)
+library(tidytext)
 
 # load data
 df = read.csv("Data/un-general-debates.csv", stringsAsFactors = FALSE)
@@ -34,6 +35,9 @@ cntryCodesMissing = data.frame(
 cntryCodes = bind_rows(cntryCodes, cntryCodesMissing)
 
 df2 = inner_join(df, cntryCodes, by = "cntryabb")
+df2 = df2 %>% arrange(year, cntryabb)
+df2$docid = seq(1, nrow(df2))
+head(df2)
 
 # Explore data
 
@@ -44,76 +48,124 @@ length(unique(df2$country))
 session_cntrycnt = df2 %>% group_by(year, country) %>% group_by(year) %>% 
                    summarize(cnt = n())
 summary(session_cntrycnt)
+ggplot() + geom_line(data = session_cntrycnt, aes(x = year, y = cnt)) + 
+  xlab("") + ylab("# Countries") + expand_limits(y = 0) + theme_bw()
 
-# text mining
-talks = df2$text
+# get text in tidy format
+tidy_df2 = df2 %>% unnest_tokens(word, text)
+head(tidy_df2)
 
-doc = VCorpus(VectorSource(talks))
-inspect(doc[1:3])
-inspect(doc[[1]])
+# remove stopwords
+data("stop_words")
+cleaned_df2 = anti_join(tidy_df2, stop_words) %>% arrange(docid)
+head(cleaned_df2)
 
-myStopwords = stopwords("english")
-myStopwords
+# remove numbers
+chknumeric = is.na(as.numeric(cleaned_df2$word))
 
-doc2 = tm_map(doc,stripWhitespace)
-doc2 = tm_map(doc2,content_transformer(tolower))
-doc2 = tm_map(doc2,removeWords,myStopwords)
-doc2 = tm_map(doc2,removePunctuation)
-doc2 = tm_map(doc2,removeNumbers)
+cleaned_df2 = cleaned_df2[chknumeric,]
 
-inspect(doc2[[1]])
+# get word counts for each document
+word_doc_cnt = cleaned_df2 %>% group_by(docid, year, country, word) %>% 
+                summarize(wordcnt = n())
+head(word_doc_cnt)
 
-dtm = DocumentTermMatrix(doc2)
-dim(dtm)
+# number of documents in which a word appears
+totdocs = nrow(df2)
+word_freq = word_doc_cnt %>% group_by(word) %>% 
+                summarize(totwordcnt = sum(wordcnt), docfreq = n()) %>%
+                  mutate(idf = log(totdocs/docfreq), tfidf = totwordcnt * idf, docfreqpct = docfreq/totdocs)
 
-# find frequent terms
-termFreq = colSums(as.matrix(dtm))
-termFreqDesc = sort(termFreq,decreasing = TRUE)
-head(termFreqDesc,30)
+numwords = table(cut(word_freq$docfreqpct, breaks = seq(0, 1, 0.1)))
+numwords
 
-dtm_flag = ifelse(as.matrix(dtm) > 0, 1, 0)
-docFreq = colSums(dtm_flag)/nrow(dtm_flag)
-head(sort(docFreq, decreasing = TRUE), 30)
+word_freq %>% filter(docfreqpct >= 0.6) %>% arrange(desc(totwordcnt)) %>% print(n = Inf)
+word_freq %>% arrange(desc(tfidf))
 
-idf = log(1 / docFreq) / log(2)
-tfidf = termFreq * idf
+# Remove words that are in either less than 5% of talks or in more than 90% of talks
+word_freqfilt = word_freq %>% filter(docfreqpct >= 0.05, docfreqpct <= 0.6)
 
-head(sort(tfidf, decreasing = TRUE), 30)
+word_doc_cntfilt = inner_join(word_doc_cnt, word_freqfilt[,c("word", "tfidf")], by = "word")
 
-quantile(tfidf, probs = seq(0, 1, 0.1))
 
-vocab = names(tfidf)[tfidf > 900]
-vocab_tfidf = tfidf[tfidf > 900]
-head(sort(vocab_tfidf, decreasing = TRUE))
+# Create year buckets
+yrbucket = cut(word_doc_cntfilt$year, breaks = c(1970, 1980, 1990, 2000, 2010, 2017), 
+                 labels = c("70s", "80s", "90s", "2000s", "2010s"), include.lowest = TRUE)
+word_doc_cntfilt$yrbucket = yrbucket
 
-# Filter document term matrix to selected vocabulary
-dtm_filt = dtm[, names(tfidf) %in% vocab]
-dim(dtm_filt)
+# check
+word_doc_cntfilt %>% group_by(yrbucket) %>% summarize(minyr = min(year), maxyr = max(year)) %>% print(n = Inf)
 
-pickyr = 1980
-dtm_filtyr = dtm_filt[df2$year == pickyr,]
-dim(dtm_filtyr)
+# Top 10 words by year
+top10words = word_doc_cntfilt %>% group_by(yrbucket, word) %>% summarize(wordcnt = sum(wordcnt)) %>% 
+    top_n(n = 10, wordcnt) %>% arrange(yrbucket, desc(wordcnt))
 
-# do a pca
-pcamdl = prcomp(dtm_filtyr)
+# Top 10 words by year for a country
+pickCountry = "Canada"
+top10cntrywords = word_doc_cntfilt %>% filter(country == pickCountry) %>% group_by(yrbucket, word) %>% summarize(wordcnt = sum(wordcnt)) %>% 
+  top_n(n = 10, wordcnt) %>% arrange(yrbucket, desc(wordcnt)) %>% print(n = Inf)
+
+tmp = word_doc_cntfilt %>% filter(word == "nuclear") %>% group_by(year) %>% summarize(totcnt = sum(wordcnt))
+ggplot() + geom_line(data = tmp, aes(x = year, y = totcnt)) + theme_bw()
+
+tmp = word_doc_cntfilt %>% filter(word == "poverty") %>% group_by(year) %>% summarize(totcnt = sum(wordcnt))
+ggplot() + geom_line(data = tmp, aes(x = year, y = totcnt)) + theme_bw()
+
+# trending words
+wordyrcnt = word_doc_cntfilt %>% group_by(year, word) %>% summarize(wordcnt = sum(wordcnt))
+yrcnt = word_doc_cntfilt %>% group_by(year) %>% summarize(yrwordcnt = sum(wordcnt))
+
+
+wordyrcnt = inner_join(wordyrcnt, yrcnt, by = "year") %>%
+  mutate(wordpct = wordcnt / yrwordcnt)
+
+ggplot() + geom_line(data = wordyrcnt %>% filter(word == "sustainable"), 
+                     aes(x = year, y = wordpct)) + theme_bw()
+
+# do PCA
+wordyrcnt_s = wordyrcnt %>% select(year, word, wordpct) %>% spread(word, wordpct, fill = 0)
+
+pcamdl = prcomp(wordyrcnt_s[-1])
+
 varexp = cumsum(pcamdl$sdev^2)/sum(pcamdl$sdev^2)
-varexp[1:2]
-pcascores = pcamdl$x[,c(1:2)]
-pcascores_df = data.frame(pcascores)
-pcascores_df$country = df2$country[df2$year == pickyr]
+varexpdf = data.frame(PC = seq(1, length(varexp)), varexp = varexp)
+ggplot() + geom_line(data = varexpdf, aes(x = PC, y = varexp)) + expand_limits(y = 0) + theme_bw()
+
+varexpdf[1:2,]
+
+scoresdf = data.frame(pcamdl$x)
+names(scoresdf) = paste0("PC", seq(1, ncol(pcamdl$x)))
+scoresdf$year = wordyrcnt_s$year
+
+loadingsdf = data.frame(pcamdl$rotation)
+loadingsdf$word = row.names(loadingsdf)
+
+pickpc = "PC3"
+
+ggplot() + geom_line(data = scoresdf, aes_string(x = "year", y = pickpc)) + theme_bw()
+
+tmploadings = loadingsdf[,c("word", pickpc)]
+names(tmploadings) = c("word", "loading")
+
+topwords = tmploadings %>% arrange(desc(loading)) %>% slice(1:5) %>% print()
+botwords = tmploadings %>% arrange(loading) %>% slice(1:5) %>% print()
+
+ggplot() + geom_line(data = wordyrcnt[wordyrcnt$word %in% topwords$word,], 
+                     aes(x = year, y = wordpct, color = word)) + theme_bw()
+
+ggplot() + geom_line(data = wordyrcnt[wordyrcnt$word %in% botwords$word,], 
+                     aes(x = year, y = wordpct, color = word)) + theme_bw()
 
 
-p <- plot_ly(pcascores_df, x = ~PC1, y = ~PC2, type = 'scatter', mode = 'markers',
-             text = ~country)
-p
 
-pcaloadings = data.frame(pcamdl$rotation[,1:2])
-pcaloadings$word = row.names(pcaloadings)
-
-pcaloadings %>% mutate(ld = abs(PC1)) %>% arrange(desc(ld)) %>% slice(1:20) %>% select(word)
-pcaloadings %>% mutate(ld = abs(PC2)) %>% arrange(desc(ld)) %>% slice(1:20) %>% select(word)
 
 # topic models
+pickyr = 2015
+dtm_filtyr = word_doc_cntfilt %>% filter(year == pickyr) %>% 
+  cast_dtm(docid, word, wordcnt)
+str(dtm_filtyr)
+dim(dtm_filtyr)
+
 
 topicmdl = LDA(dtm_filtyr, k = 10, control = list(seed = 1234))
 
@@ -121,5 +173,9 @@ topicTerms = terms(topicmdl, 10)
 topicTerms
 
 topicTopics = topics(topicmdl)
-cntryList = df2$country[df2$year == pickyr]
-cntryList[topicTopics == 1]
+cntrylist = word_doc_cntfilt %>% filter(year == pickyr) %>% group_by(docid, country) %>% slice(1:1)
+cntrylist$topic = topicTopics[as.character(cntrylist$docid)]
+
+pickTopic = 6
+topicTerms[,pickTopic]
+cntrylist %>% filter(topic == pickTopic) %>% select(country) %>% print(n = Inf)
