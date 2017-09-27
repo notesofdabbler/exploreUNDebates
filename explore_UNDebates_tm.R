@@ -11,6 +11,7 @@ library(tidyr)
 library(tm)
 library(topicmodels)
 library(ggplot2)
+library(ggthemes)
 library(tidytext)
 
 # load data
@@ -39,15 +40,12 @@ df2 = df2 %>% arrange(year, cntryabb)
 df2$docid = seq(1, nrow(df2))
 head(df2)
 
-# Explore data
-
-# Number of countries
+# Number of countries in the data
 length(unique(df2$country))
 
 # count number of countries presented at each session
 session_cntrycnt = df2 %>% group_by(year, country) %>% group_by(year) %>% 
                    summarize(cnt = n())
-summary(session_cntrycnt)
 ggplot() + geom_line(data = session_cntrycnt, aes(x = year, y = cnt)) + 
   xlab("") + ylab("# Countries") + expand_limits(y = 0) + theme_bw()
 
@@ -62,7 +60,6 @@ head(cleaned_df2)
 
 # remove numbers
 chknumeric = is.na(as.numeric(cleaned_df2$word))
-
 cleaned_df2 = cleaned_df2[chknumeric,]
 
 # get word counts for each document
@@ -100,10 +97,19 @@ word_doc_cntfilt %>% group_by(yrbucket) %>% summarize(minyr = min(year), maxyr =
 top10words = word_doc_cntfilt %>% group_by(yrbucket, word) %>% summarize(wordcnt = sum(wordcnt)) %>% 
     top_n(n = 10, wordcnt) %>% arrange(yrbucket, desc(wordcnt))
 
+top10words = top10words %>% group_by(yrbucket) %>% mutate(x = 1, y = n():1)
+ggplot() + geom_text(data = top10words, aes(x = x, y = y, label = word)) + 
+           facet_grid(~yrbucket) + theme_void(20)
+
 # Top 10 words by year for a country
 pickCountry = "Canada"
 top10cntrywords = word_doc_cntfilt %>% filter(country == pickCountry) %>% group_by(yrbucket, word) %>% summarize(wordcnt = sum(wordcnt)) %>% 
-  top_n(n = 10, wordcnt) %>% arrange(yrbucket, desc(wordcnt)) %>% print(n = Inf)
+  top_n(n = 10, wordcnt) %>% arrange(yrbucket, desc(wordcnt)) %>% slice(1:10) %>% print(n = Inf)
+
+top10cntrywords = top10cntrywords %>% group_by(yrbucket) %>% mutate(x = 1, y = n():1)
+ggplot() + geom_text(data = top10cntrywords, aes(x = x, y = y, label = word)) + 
+  facet_grid(~yrbucket) + theme_void(20)
+
 
 tmp = word_doc_cntfilt %>% filter(word == "nuclear") %>% group_by(year) %>% summarize(totcnt = sum(wordcnt))
 ggplot() + geom_line(data = tmp, aes(x = year, y = totcnt)) + theme_bw()
@@ -111,22 +117,24 @@ ggplot() + geom_line(data = tmp, aes(x = year, y = totcnt)) + theme_bw()
 tmp = word_doc_cntfilt %>% filter(word == "poverty") %>% group_by(year) %>% summarize(totcnt = sum(wordcnt))
 ggplot() + geom_line(data = tmp, aes(x = year, y = totcnt)) + theme_bw()
 
-# trending words
+# detect trending words with PCA
+
+# count of words in each year
 wordyrcnt = word_doc_cntfilt %>% group_by(year, word) %>% summarize(wordcnt = sum(wordcnt))
+# total words in each year
 yrcnt = word_doc_cntfilt %>% group_by(year) %>% summarize(yrwordcnt = sum(wordcnt))
 
-
+# get percentage of words in each year
 wordyrcnt = inner_join(wordyrcnt, yrcnt, by = "year") %>%
   mutate(wordpct = wordcnt / yrwordcnt)
 
-ggplot() + geom_line(data = wordyrcnt %>% filter(word == "sustainable"), 
-                     aes(x = year, y = wordpct)) + theme_bw()
-
-# do PCA
+# reshape to the form year x words for input to PCA
 wordyrcnt_s = wordyrcnt %>% select(year, word, wordpct) %>% spread(word, wordpct, fill = 0)
 
+# PCA
 pcamdl = prcomp(wordyrcnt_s[-1])
 
+# variance explained plot
 varexp = cumsum(pcamdl$sdev^2)/sum(pcamdl$sdev^2)
 varexpdf = data.frame(PC = seq(1, length(varexp)), varexp = varexp)
 ggplot() + geom_line(data = varexpdf, aes(x = PC, y = varexp)) + expand_limits(y = 0) + theme_bw()
@@ -140,7 +148,7 @@ scoresdf$year = wordyrcnt_s$year
 loadingsdf = data.frame(pcamdl$rotation)
 loadingsdf$word = row.names(loadingsdf)
 
-pickpc = "PC3"
+pickpc = "PC1"
 
 ggplot() + geom_line(data = scoresdf, aes_string(x = "year", y = pickpc)) + theme_bw()
 
@@ -156,9 +164,6 @@ ggplot() + geom_line(data = wordyrcnt[wordyrcnt$word %in% topwords$word,],
 ggplot() + geom_line(data = wordyrcnt[wordyrcnt$word %in% botwords$word,], 
                      aes(x = year, y = wordpct, color = word)) + theme_bw()
 
-
-
-
 # topic models
 pickyr = 2015
 dtm_filtyr = word_doc_cntfilt %>% filter(year == pickyr) %>% 
@@ -166,8 +171,19 @@ dtm_filtyr = word_doc_cntfilt %>% filter(year == pickyr) %>%
 str(dtm_filtyr)
 dim(dtm_filtyr)
 
+word_doc_cntyrbucket = word_doc_cntfilt %>% group_by(yrbucket, country, word) %>% 
+           summarize(wordcnt = sum(wordcnt))
+yrbucket_country_id = word_doc_cntyrbucket %>% group_by(yrbucket, country) %>%
+                 summarize(cnt = n()) %>% ungroup() %>% mutate(docid = 1:n())
+word_doc_cntyrbucket = inner_join(word_doc_cntyrbucket, 
+                                  yrbucket_country_id[,c("docid", "yrbucket", "country")], by = c("yrbucket", "country"))
 
-topicmdl = LDA(dtm_filtyr, k = 10, control = list(seed = 1234))
+dtm = word_doc_cntyrbucket %>% cast_dtm(docid, word, wordcnt)
+str(dtm)
+dim(dtm)
+
+
+topicmdl = LDA(dtm, k = 50, control = list(seed = 1234, verbose = TRUE))
 
 topicTerms = terms(topicmdl, 10)
 topicTerms
@@ -179,3 +195,50 @@ cntrylist$topic = topicTopics[as.character(cntrylist$docid)]
 pickTopic = 6
 topicTerms[,pickTopic]
 cntrylist %>% filter(topic == pickTopic) %>% select(country) %>% print(n = Inf)
+
+# topic model with R LDA package
+
+# convert data to LDA format
+pickyr = 1980
+dtm_filtyr = word_doc_cntfilt %>% filter(year == pickyr) %>% 
+  cast_dtm(docid, word, wordcnt)
+str(dtm_filtyr)
+dim(dtm_filtyr)
+
+doclist = list()
+for(i in 1:nrow(dtm_filtyr)) {
+  doclist[[i]] = matrix(as.integer(c(dtm_filtyr$j[dtm_filtyr$i == i] - 1, 
+                                     dtm_filtyr$v[dtm_filtyr$i == i])), byrow = TRUE, nrow = 2
+  )
+}
+
+vocab = dtm_filtyr$dimnames$Terms
+
+result <- lda.collapsed.gibbs.sampler(doclist,
+                                      10,  ## Num clusters
+                                      vocab,
+                                      100,  ## Num iterations
+                                      0.1,
+                                      0.1) 
+
+top.words <- top.topic.words(result$topics, 10, by.score=TRUE)
+
+
+doclist = list()
+for(i in 1:nrow(dtm)) {
+  doclist[[i]] = matrix(as.integer(c(dtm$j[dtm$i == i] - 1, 
+                                     dtm$v[dtm$i == i])), byrow = TRUE, nrow = 2
+  )
+}
+
+vocab = dtm$dimnames$Terms
+
+result <- lda.collapsed.gibbs.sampler(doclist,
+                                      50,  ## Num clusters
+                                      vocab,
+                                      25,  ## Num iterations
+                                      0.1,
+                                      0.1) 
+
+top.words <- top.topic.words(result$topics, 10, by.score=TRUE)
+
