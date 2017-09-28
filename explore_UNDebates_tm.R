@@ -6,6 +6,7 @@
 #
 #
 
+#------------load libraries---------------------
 library(dplyr)
 library(tidyr)
 library(tm)
@@ -13,8 +14,9 @@ library(topicmodels)
 library(ggplot2)
 library(ggthemes)
 library(tidytext)
+library(lda)
 
-# load data
+#------------ load data -----------------------
 df = read.csv("Data/un-general-debates.csv", stringsAsFactors = FALSE)
 # read country codes
 cntryCodes = read.csv("Data/cntryCodes.csv", stringsAsFactors = FALSE)
@@ -49,6 +51,7 @@ session_cntrycnt = df2 %>% group_by(year, country) %>% group_by(year) %>%
 ggplot() + geom_line(data = session_cntrycnt, aes(x = year, y = cnt)) + 
   xlab("") + ylab("# Countries") + expand_limits(y = 0) + theme_bw()
 
+#---------------Get data in tidy format-------------------------
 # get text in tidy format
 tidy_df2 = df2 %>% unnest_tokens(word, text)
 head(tidy_df2)
@@ -62,28 +65,29 @@ head(cleaned_df2)
 chknumeric = is.na(as.numeric(cleaned_df2$word))
 cleaned_df2 = cleaned_df2[chknumeric,]
 
+#----------Get word counts and filter words for PCA and topic models ------------
 # get word counts for each document
 word_doc_cnt = cleaned_df2 %>% group_by(docid, year, country, word) %>% 
                 summarize(wordcnt = n())
 head(word_doc_cnt)
 
-# number of documents in which a word appears
+# calculate tf-idf
 totdocs = nrow(df2)
 word_freq = word_doc_cnt %>% group_by(word) %>% 
                 summarize(totwordcnt = sum(wordcnt), docfreq = n()) %>%
                   mutate(idf = log(totdocs/docfreq), tfidf = totwordcnt * idf, docfreqpct = docfreq/totdocs)
 
+# Check distribution of words in vocabular in terms of % of document they appear in
 numwords = table(cut(word_freq$docfreqpct, breaks = seq(0, 1, 0.1)))
 numwords
 
+# Check words that appear in more than x% of documents
 word_freq %>% filter(docfreqpct >= 0.6) %>% arrange(desc(totwordcnt)) %>% print(n = Inf)
 word_freq %>% arrange(desc(tfidf))
 
-# Remove words that are in either less than 5% of talks or in more than 90% of talks
+# Remove words in vocabulary that are in either less than 5% of talks or in more than 60% of talks
 word_freqfilt = word_freq %>% filter(docfreqpct >= 0.05, docfreqpct <= 0.6)
-
 word_doc_cntfilt = inner_join(word_doc_cnt, word_freqfilt[,c("word", "tfidf")], by = "word")
-
 
 # Create year buckets
 yrbucket = cut(word_doc_cntfilt$year, breaks = c(1970, 1980, 1990, 2000, 2010, 2017), 
@@ -93,6 +97,7 @@ word_doc_cntfilt$yrbucket = yrbucket
 # check
 word_doc_cntfilt %>% group_by(yrbucket) %>% summarize(minyr = min(year), maxyr = max(year)) %>% print(n = Inf)
 
+#--------------Explore word counts ----------------------
 # Top 10 words by year
 top10words = word_doc_cntfilt %>% group_by(yrbucket, word) %>% summarize(wordcnt = sum(wordcnt)) %>% 
     top_n(n = 10, wordcnt) %>% arrange(yrbucket, desc(wordcnt))
@@ -110,15 +115,12 @@ top10cntrywords = top10cntrywords %>% group_by(yrbucket) %>% mutate(x = 1, y = n
 ggplot() + geom_text(data = top10cntrywords, aes(x = x, y = y, label = word)) + 
   facet_grid(~yrbucket) + theme_void(20)
 
+#----------detect trending words with PCA------------------------
 
-tmp = word_doc_cntfilt %>% filter(word == "nuclear") %>% group_by(year) %>% summarize(totcnt = sum(wordcnt))
-ggplot() + geom_line(data = tmp, aes(x = year, y = totcnt)) + theme_bw()
+# Create data for PCA by finding % of words that occur in each year
+# PCA data (year x word) with value % of a word that occurs in the year
 
-tmp = word_doc_cntfilt %>% filter(word == "poverty") %>% group_by(year) %>% summarize(totcnt = sum(wordcnt))
-ggplot() + geom_line(data = tmp, aes(x = year, y = totcnt)) + theme_bw()
-
-# detect trending words with PCA
-
+#---- Create PCA data
 # count of words in each year
 wordyrcnt = word_doc_cntfilt %>% group_by(year, word) %>% summarize(wordcnt = sum(wordcnt))
 # total words in each year
@@ -131,7 +133,7 @@ wordyrcnt = inner_join(wordyrcnt, yrcnt, by = "year") %>%
 # reshape to the form year x words for input to PCA
 wordyrcnt_s = wordyrcnt %>% select(year, word, wordpct) %>% spread(word, wordpct, fill = 0)
 
-# PCA
+#---- run PCA
 pcamdl = prcomp(wordyrcnt_s[-1])
 
 # variance explained plot
@@ -139,8 +141,10 @@ varexp = cumsum(pcamdl$sdev^2)/sum(pcamdl$sdev^2)
 varexpdf = data.frame(PC = seq(1, length(varexp)), varexp = varexp)
 ggplot() + geom_line(data = varexpdf, aes(x = PC, y = varexp)) + expand_limits(y = 0) + theme_bw()
 
+# variance explained by first 2 PCs
 varexpdf[1:2,]
 
+# create scores and loadings dataframe
 scoresdf = data.frame(pcamdl$x)
 names(scoresdf) = paste0("PC", seq(1, ncol(pcamdl$x)))
 scoresdf$year = wordyrcnt_s$year
@@ -164,13 +168,9 @@ ggplot() + geom_line(data = wordyrcnt[wordyrcnt$word %in% topwords$word,],
 ggplot() + geom_line(data = wordyrcnt[wordyrcnt$word %in% botwords$word,], 
                      aes(x = year, y = wordpct, color = word)) + theme_bw()
 
-# topic models
-pickyr = 2015
-dtm_filtyr = word_doc_cntfilt %>% filter(year == pickyr) %>% 
-  cast_dtm(docid, word, wordcnt)
-str(dtm_filtyr)
-dim(dtm_filtyr)
+# topic model with R LDA package
 
+# aggregate data to country-year bucket level
 word_doc_cntyrbucket = word_doc_cntfilt %>% group_by(yrbucket, country, word) %>% 
            summarize(wordcnt = sum(wordcnt))
 yrbucket_country_id = word_doc_cntyrbucket %>% group_by(yrbucket, country) %>%
@@ -178,52 +178,12 @@ yrbucket_country_id = word_doc_cntyrbucket %>% group_by(yrbucket, country) %>%
 word_doc_cntyrbucket = inner_join(word_doc_cntyrbucket, 
                                   yrbucket_country_id[,c("docid", "yrbucket", "country")], by = c("yrbucket", "country"))
 
+# construct document-term matrix
 dtm = word_doc_cntyrbucket %>% cast_dtm(docid, word, wordcnt)
 str(dtm)
 dim(dtm)
 
-
-topicmdl = LDA(dtm, k = 50, control = list(seed = 1234, verbose = TRUE))
-
-topicTerms = terms(topicmdl, 10)
-topicTerms
-
-topicTopics = topics(topicmdl)
-cntrylist = word_doc_cntfilt %>% filter(year == pickyr) %>% group_by(docid, country) %>% slice(1:1)
-cntrylist$topic = topicTopics[as.character(cntrylist$docid)]
-
-pickTopic = 6
-topicTerms[,pickTopic]
-cntrylist %>% filter(topic == pickTopic) %>% select(country) %>% print(n = Inf)
-
-# topic model with R LDA package
-
-# convert data to LDA format
-pickyr = 1980
-dtm_filtyr = word_doc_cntfilt %>% filter(year == pickyr) %>% 
-  cast_dtm(docid, word, wordcnt)
-str(dtm_filtyr)
-dim(dtm_filtyr)
-
-doclist = list()
-for(i in 1:nrow(dtm_filtyr)) {
-  doclist[[i]] = matrix(as.integer(c(dtm_filtyr$j[dtm_filtyr$i == i] - 1, 
-                                     dtm_filtyr$v[dtm_filtyr$i == i])), byrow = TRUE, nrow = 2
-  )
-}
-
-vocab = dtm_filtyr$dimnames$Terms
-
-result <- lda.collapsed.gibbs.sampler(doclist,
-                                      10,  ## Num clusters
-                                      vocab,
-                                      100,  ## Num iterations
-                                      0.1,
-                                      0.1) 
-
-top.words <- top.topic.words(result$topics, 10, by.score=TRUE)
-
-
+# convert document-term matrix to LDA format
 doclist = list()
 for(i in 1:nrow(dtm)) {
   doclist[[i]] = matrix(as.integer(c(dtm$j[dtm$i == i] - 1, 
@@ -233,6 +193,7 @@ for(i in 1:nrow(dtm)) {
 
 vocab = dtm$dimnames$Terms
 
+# run topic model with LDA
 result <- lda.collapsed.gibbs.sampler(doclist,
                                       50,  ## Num clusters
                                       vocab,
@@ -240,5 +201,25 @@ result <- lda.collapsed.gibbs.sampler(doclist,
                                       0.1,
                                       0.1) 
 
-top.words <- top.topic.words(result$topics, 10, by.score=TRUE)
+# top 5 words in each topic
+top.words <- top.topic.words(result$topics, 5, by.score=TRUE)
+
+# find topic proportions in each document
+topicmap  = t(result$document_sums)
+topicmap = topicmap/rowSums(topicmap)
+topicmapdf = data.frame(topicmap)
+topicmapdf$docid = seq(1, nrow(topicmapdf))
+
+topicmapdfg = topicmapdf %>% gather(topic, topicpct, -docid)
+topicmapdfg = inner_join(topicmapdfg, yrbucket_country_id[,c("docid", "yrbucket", "country")], by = "docid")
+
+topicmap_summ = topicmapdfg %>% group_by(yrbucket, topic) %>% summarize(topicpct = mean(topicpct))
+
+ggplot() + geom_bar(data = topicmap_summ, aes(x = yrbucket, y = topicpct), stat = "identity") + 
+  facet_wrap(~topic) + theme_bw()
+
+# assign topic with highest proportion to the document
+topicmapdfg2 = topicmapdfg %>% group_by(docid) %>% filter(topicpct == max(topicpct))
+topicmapdfg2 %>% ungroup() %>% filter(topic == "X13") %>% arrange(desc(topicpct)) %>% 
+  distinct(country) %>% slice(1:5) %>% print(n = Inf)
 
