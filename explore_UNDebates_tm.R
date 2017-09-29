@@ -203,6 +203,7 @@ result <- lda.collapsed.gibbs.sampler(doclist,
 
 # top 5 words in each topic
 top.words <- top.topic.words(result$topics, 5, by.score=TRUE)
+topiclabel = apply(t(top.words), 1, paste, collapse = " ")
 
 # find topic proportions in each document
 topicmap  = t(result$document_sums)
@@ -223,3 +224,48 @@ topicmapdfg2 = topicmapdfg %>% group_by(docid) %>% filter(topicpct == max(topicp
 topicmapdfg2 %>% ungroup() %>% filter(topic == "X13") %>% arrange(desc(topicpct)) %>% 
   distinct(country) %>% slice(1:5) %>% print(n = Inf)
 
+# cluster analysis
+pickyrbucket = "90s"
+clusdf = inner_join(topicmapdf,
+                    yrbucket_country_id[,c("docid", "country", "yrbucket")], by = "docid")
+clusdfyr = clusdf %>% filter(yrbucket == pickyrbucket)
+
+clusmdl = kmeans(clusdfyr[,1:50], 10)
+
+clusdfyr$cluster = clusmdl$cluster
+clusdfyr = inner_join(clusdfyr, cntryCodes[,c("country", "cntryabb")], by = "country")
+
+
+p = plot_geo(clusdfyr) %>% add_trace(z = ~cluster, color = ~cluster,
+                                text = ~country, locations = ~cntryabb, marker = list(line = l)) %>% 
+  layout(title = "hello", geo = g)
+p
+
+clusdfyrg = clusdfyr %>%  gather(topic, topicpct, -cluster, -docid, -country, -cntryabb, -yrbucket)
+clussumm = clusdfyrg %>% group_by(cluster, topic) %>% summarize(topicpct = mean(topicpct))
+clussumm$topicf = factor(clussumm$topic, levels = paste0("X", seq(1, 50)))
+
+ggplot() + geom_bar(data = clussumm, aes(x = topicf, y = topicpct), stat = "identity") + 
+      facet_grid(~cluster) + theme_bw() + coord_flip()
+
+pickyrbucket = "2010s"
+picktopic = "X47"
+tmp = inner_join(topicmapdf[,c(picktopic, "docid")], 
+                 yrbucket_country_id[,c("docid", "country", "yrbucket")], by = "docid")
+tmp = tmp %>% filter(yrbucket == pickyrbucket)
+tmp = inner_join(tmp, cntryCodes[,c("country", "cntryabb")], by = "country")
+
+l <- list(color = toRGB("grey"), width = 0.5)
+
+g <- list(
+  showframe = FALSE,
+  showcoastlines = FALSE,
+  projection = list(type = 'Mercator')
+)
+
+tmp$topicpct = tmp[[picktopic]]
+
+p = plot_geo(tmp) %>% add_trace(z = ~topicpct, color = ~topicpct, colors = 'Blues',
+                                    text = ~country, locations = ~cntryabb, marker = list(line = l)) %>% 
+            layout(title = "hello", geo = g)
+p
